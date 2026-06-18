@@ -1,0 +1,25 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { httpClient } from '../http_client.js';
+
+export function registerExceptionTools(server: McpServer) {
+  server.tool('x64dbg_exceptions', 'Exception breakpoints: set, delete, list codes, skip', {
+    action: z.discriminatedUnion("action", [
+      z.object({ action: z.literal("set"), code: z.string() }),
+      z.object({ action: z.literal("delete"), code: z.string() }),
+      z.object({ action: z.literal("list") }),
+      z.object({ action: z.literal("list_codes") }),
+      z.object({ action: z.literal("skip"), code: z.string() })
+    ])
+  }, async ({ action }) => {
+    let data: any;
+    switch (action.action) {
+      case 'set': data = await httpClient.post('/api/exceptions/set_bp', { code: action.code }); break;
+      case 'delete': data = await httpClient.post('/api/exceptions/delete_bp', { code: action.code }); break;
+      case 'list': data = await httpClient.get('/api/exceptions/list_bps'); break;
+      case 'list_codes': data = await httpClient.get('/api/exceptions/list_codes'); break;
+      case 'skip': data = await httpClient.post('/api/exceptions/skip', { code: action.code }); break;
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+  });
+}

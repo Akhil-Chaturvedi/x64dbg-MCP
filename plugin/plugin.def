@@ -1,0 +1,5 @@
+EXPORTS
+    pluginit
+    plugsetup
+    plugstop
+    CBMENUENTRY
