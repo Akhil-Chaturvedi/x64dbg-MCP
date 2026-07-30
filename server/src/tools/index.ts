@@ -19,6 +19,7 @@ import { registerExceptionTools } from './exceptions.js';
 import { registerProcessTools, registerHandleTools, registerControlFlowTools, registerPatchTools } from './process.js';
 import { registerAdvancedDumpTools } from './advanced_dump.js';
 import { registerContextTools, registerFunctionTools, registerScriptTools, registerSystemTools, registerAssemblerTools, registerBookmarkTools, registerSnapshotDiffTools, registerAutoPatchTools, registerBatchAnnotationTools } from './context.js';
+import { registerFridaBridgeTools } from './frida_bridge.js';
 
 export function registerAllTools(server: McpServer) {
   registerDebugTools(server);
@@ -57,4 +58,5 @@ export function registerAllTools(server: McpServer) {
   registerAutoPatchTools(server);
   registerBatchAnnotationTools(server);
   registerPatternSearchTool(server);
+  registerFridaBridgeTools(server);
 }

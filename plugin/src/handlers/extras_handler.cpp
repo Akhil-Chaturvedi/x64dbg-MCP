@@ -2874,6 +2874,180 @@ void register_extras_routes(c_http_router& router) {
         DbgFunctions()->RefreshModuleList();
         return s_http_response::ok({{"success", true}});
     });
+
+    // =====================================================================
+    // Memory Snapshot & Diff (XR3)
+    // =====================================================================
+    // In-memory snapshot storage, keyed by label.
+    // Lives for the lifetime of the plugin (cleared on debugger detach/stop).
+    static std::unordered_map<std::string, std::vector<uint8_t>> g_memory_snapshots;
+
+    // POST /api/memory/snapshot - Capture a memory region snapshot
+    // Body: { "address": "0x...", "size": "0x...", "label": "my_snapshot" }
+    router.post("/api/memory/snapshot", [](const s_http_request& req) -> s_http_response {
+        auto& bridge = get_bridge();
+        if (!bridge.require_paused()) {
+            return s_http_response::conflict("Debugger must be paused");
+        }
+
+        auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("address") || !body.contains("size") || !body.contains("label")) {
+            return s_http_response::bad_request("Missing 'address', 'size', and/or 'label' fields");
+        }
+
+        auto address_str = body["address"].get<std::string>();
+        auto size_str = body["size"].get<std::string>();
+        auto label = body["label"].get<std::string>();
+
+        auto address = bridge.eval_expression(address_str);
+        auto size = static_cast<size_t>(std::stoull(size_str, nullptr, 16));
+
+        if (size == 0 || size > 0x10000000) { // 256MB sanity limit
+            return s_http_response::bad_request("Invalid size (must be 1 byte to 256MB)");
+        }
+
+        auto mem = bridge.read_memory(address, size);
+        if (!mem.has_value()) {
+            return s_http_response::internal_error("Failed to read memory at " + address_str);
+        }
+
+        g_memory_snapshots[label] = std::move(mem.value());
+
+        return s_http_response::ok({
+            {"label",   label},
+            {"address", format_utils::format_address(address)},
+            {"size",    size},
+            {"stored",  true}
+        });
+    });
+
+    // POST /api/memory/snapshot_list - List all stored snapshot labels
+    router.get("/api/memory/snapshot_list", [](const s_http_request&) -> s_http_response {
+        auto labels = nlohmann::json::array();
+        for (const auto& [label, data] : g_memory_snapshots) {
+            labels.push_back({
+                {"label", label},
+                {"size",  data.size()}
+            });
+        }
+        return s_http_response::ok({
+            {"snapshots", labels},
+            {"count",     labels.size()}
+        });
+    });
+
+    // POST /api/memory/snapshot_delete - Delete a stored snapshot by label
+    router.post("/api/memory/snapshot_delete", [](const s_http_request& req) -> s_http_response {
+        auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("label")) {
+            return s_http_response::bad_request("Missing 'label' field");
+        }
+
+        auto label = body["label"].get<std::string>();
+        auto erased = g_memory_snapshots.erase(label);
+
+        return s_http_response::ok({
+            {"label",  label},
+            {"erased", erased > 0}
+        });
+    });
+
+    // POST /api/memory/diff - Compare a stored snapshot with current memory
+    // Body: { "label": "my_snapshot", "address": "0x...", "size": "0x..." }
+    // Returns list of changed regions with before/after bytes.
+    router.post("/api/memory/diff", [](const s_http_request& req) -> s_http_response {
+        auto& bridge = get_bridge();
+        if (!bridge.require_paused()) {
+            return s_http_response::conflict("Debugger must be paused");
+        }
+
+        auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("label") || !body.contains("address") || !body.contains("size")) {
+            return s_http_response::bad_request("Missing 'label', 'address', and/or 'size' fields");
+        }
+
+        auto label = body["label"].get<std::string>();
+        auto address_str = body["address"].get<std::string>();
+        auto size_str = body["size"].get<std::string>();
+
+        auto it = g_memory_snapshots.find(label);
+        if (it == g_memory_snapshots.end()) {
+            return s_http_response::not_found("Snapshot '" + label + "' not found");
+        }
+
+        auto address = bridge.eval_expression(address_str);
+        auto size = static_cast<size_t>(std::stoull(size_str, nullptr, 16));
+
+        if (size == 0 || size > 0x10000000) {
+            return s_http_response::bad_request("Invalid size (must be 1 byte to 256MB)");
+        }
+
+        auto current = bridge.read_memory(address, size);
+        if (!current.has_value()) {
+            return s_http_response::internal_error("Failed to read current memory at " + address_str);
+        }
+
+        const auto& saved = it->second;
+        const auto& curr = current.value();
+        auto changes = nlohmann::json::array();
+        size_t min_size = std::min(saved.size(), curr.size());
+
+        size_t i = 0;
+        while (i < min_size) {
+            if (saved[i] != curr[i]) {
+                // Start of a changed region
+                auto change_start = address + i;
+                std::vector<uint8_t> old_bytes, new_bytes;
+
+                while (i < min_size && saved[i] != curr[i]) {
+                    old_bytes.push_back(saved[i]);
+                    new_bytes.push_back(curr[i]);
+                    ++i;
+                }
+
+                auto change_end = address + i - 1;
+                changes.push_back({
+                    {"start",      format_utils::format_address(change_start)},
+                    {"end",        format_utils::format_address(change_end)},
+                    {"size",       old_bytes.size()},
+                    {"old_bytes",  format_utils::format_bytes_hex(old_bytes.data(), old_bytes.size())},
+                    {"new_bytes",  format_utils::format_bytes_hex(new_bytes.data(), new_bytes.size())}
+                });
+            } else {
+                ++i;
+            }
+        }
+
+        // Handle case where current memory is larger than saved snapshot
+        if (curr.size() > saved.size()) {
+            auto extra_start = address + saved.size();
+            auto extra_size = curr.size() - saved.size();
+            std::vector<uint8_t> new_bytes(curr.begin() + saved.size(), curr.end());
+            changes.push_back({
+                {"start",      format_utils::format_address(extra_start)},
+                {"end",        format_utils::format_address(address + curr.size() - 1)},
+                {"size",       extra_size},
+                {"old_bytes",  "(beyond snapshot range)"},
+                {"new_bytes",  format_utils::format_bytes_hex(new_bytes.data(), new_bytes.size())}
+            });
+        }
+
+        // Compute a simple diff summary
+        duint total_diff_bytes = 0;
+        for (const auto& c : changes) {
+            total_diff_bytes += c["size"].get<duint>();
+        }
+
+        return s_http_response::ok({
+            {"label",           label},
+            {"address",         format_utils::format_address(address)},
+            {"size",            size},
+            {"snapshot_size",    saved.size()},
+            {"changes",         changes},
+            {"changed_regions", changes.size()},
+            {"total_diff_bytes", total_diff_bytes}
+        });
+    });
 }
 
 } // namespace handlers

@@ -3,6 +3,58 @@ import { z } from 'zod';
 import { httpClient } from '../http_client.js';
 
 export function registerMemoryTools(server: McpServer) {
+  // Memory snapshot tool (XR3)
+  server.tool(
+    'x64dbg_memory_snapshot',
+    'Take a snapshot of a memory region for later comparison. Use x64dbg_memory_diff to compare against current memory.',
+    {
+      address: z.string().describe('Address of the memory region (hex string or expression)'),
+      size: z.string().describe('Size of the memory region in hex (e.g. "0x20000")'),
+      label: z.string().describe('Label to identify this snapshot (e.g. "before_open")')
+    },
+    async ({ address, size, label }) => {
+      const data = await httpClient.post('/api/memory/snapshot', { address, size, label });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // Memory diff tool (XR3)
+  server.tool(
+    'x64dbg_memory_diff',
+    'Compare a previously captured memory snapshot with current memory to find what changed. Helps identify decoded buffers.',
+    {
+      label: z.string().describe('Label of the snapshot to compare against (e.g. "before_open")'),
+      address: z.string().describe('Address of the memory region (hex string or expression)'),
+      size: z.string().describe('Size of the memory region in hex (e.g. "0x20000")')
+    },
+    async ({ label, address, size }) => {
+      const data = await httpClient.post('/api/memory/diff', { label, address, size });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // Snapshot management tools
+  server.tool(
+    'x64dbg_memory_snapshot_list',
+    'List all stored memory snapshots with their labels and sizes.',
+    {},
+    async () => {
+      const data = await httpClient.get('/api/memory/snapshot_list');
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'x64dbg_memory_snapshot_delete',
+    'Delete a stored memory snapshot by label.',
+    {
+      label: z.string().describe('Label of the snapshot to delete')
+    },
+    async ({ label }) => {
+      const data = await httpClient.post('/api/memory/snapshot_delete', { label });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
   server.tool(
     'x64dbg_memory',
     'Core memory operations: read, write, info, allocate, free, protect, map',
